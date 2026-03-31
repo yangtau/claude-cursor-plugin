@@ -43,6 +43,7 @@ function printUsage() {
       "  cursor-companion review [--model <model>] [focus text]",
       "  cursor-companion status [job-id] [--all] [--json]",
       "  cursor-companion result [job-id] [--json]",
+      "  cursor-companion models [--json]",
       "  cursor-companion cancel [job-id] [--json]",
     ].join("\n")
   );
@@ -92,7 +93,7 @@ function shorten(text, limit = 96) {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
 }
 
-function ensureCursorReady(cwd) {
+function ensureCursorReady() {
   const cursor = getCursorAvailability();
   if (!cursor.available) {
     throw new Error("cursor-agent is not installed. Install it from cursor.com or your package manager.");
@@ -143,7 +144,7 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  ensureCursorReady(cwd);
+  ensureCursorReady();
 
   // Read prompt
   let prompt;
@@ -281,7 +282,7 @@ async function handleReview(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  ensureCursorReady(cwd);
+  ensureCursorReady();
 
   // Build review prompt from git diff
   let diffContext = "";
@@ -434,6 +435,56 @@ function handleResult(argv) {
   );
 }
 
+// ── Models ──
+
+async function handleModels(argv) {
+  const { options } = parseCommandInput(argv, {
+    booleanOptions: ["json"],
+  });
+
+  const { execFileSync } = await import("node:child_process");
+  let raw = "";
+  try {
+    raw = execFileSync("cursor-agent", ["--list-models"], {
+      encoding: "utf8",
+      timeout: 30000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    throw new Error("Failed to list models. Is cursor-agent installed and authenticated?");
+  }
+
+  // Strip ANSI escape sequences from cursor-agent output
+  const clean = raw.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07/g, "").trim();
+
+  // Parse into structured data
+  const models = [];
+  for (const line of clean.split("\n")) {
+    const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((default|current)\))?$/);
+    if (match) {
+      models.push({
+        id: match[1],
+        name: match[2].trim(),
+        ...(match[3] ? { tag: match[3] } : {}),
+      });
+    }
+  }
+
+  if (options.json) {
+    outputResult({ models }, true);
+  } else {
+    const lines = ["## Available Cursor Agent Models\n"];
+    for (const m of models) {
+      const tag = m.tag ? ` (${m.tag})` : "";
+      lines.push(`- **${m.id}** — ${m.name}${tag}`);
+    }
+    lines.push("\n---");
+    lines.push("Use `--model <id>` when running a task:");
+    lines.push("  `/cursor:task --model grok-4-20 \"your prompt\"`");
+    outputResult(lines.join("\n") + "\n", false);
+  }
+}
+
 // ── Cancel ──
 
 function handleCancel(argv) {
@@ -508,6 +559,9 @@ async function main() {
       break;
     case "result":
       handleResult(argv);
+      break;
+    case "models":
+      await handleModels(argv);
       break;
     case "cancel":
       handleCancel(argv);

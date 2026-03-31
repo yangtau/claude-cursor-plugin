@@ -10,6 +10,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import process from "node:process";
 
+import { removeSessionJobs } from "./lib/state.mjs";
+import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+
 const SESSION_ID_ENV = "CURSOR_COMPANION_SESSION_ID";
 
 function readHookInput() {
@@ -30,7 +33,15 @@ function handleSessionStart() {
 }
 
 function handleSessionEnd() {
-  // Session cleanup is handled by state expiry; nothing critical to do here.
+  const sessionId = process.env[SESSION_ID_ENV];
+  if (sessionId) {
+    try {
+      const workspaceRoot = resolveWorkspaceRoot(process.cwd());
+      removeSessionJobs(workspaceRoot, sessionId);
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }
 
 const event = process.argv[2];

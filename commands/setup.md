@@ -1,6 +1,5 @@
 ---
 description: Check whether cursor-agent CLI is ready and authenticated
-argument-hint: ''
 allowed-tools: Bash(node:*), Bash(which:*), Bash(cursor-agent:*), AskUserQuestion
 ---
 
