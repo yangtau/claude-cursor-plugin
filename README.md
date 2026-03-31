@@ -31,10 +31,11 @@ Verify with:
 | `/cursor:setup` | Check cursor-agent availability and auth status |
 | `/cursor:task <prompt>` | Delegate a coding task to Cursor Agent |
 | `/cursor:review [focus]` | Run a code review using Cursor Agent |
-| `/cursor:models` | List available models |
+| `/cursor:model` | List models, or set the workspace default model (`/cursor:model <id>`; `--clear` to reset) |
 | `/cursor:status [job-id]` | Show active and recent jobs |
 | `/cursor:result [job-id]` | Show output of a completed job |
 | `/cursor:cancel [job-id]` | Cancel a running background job |
+| `/cursor:execute-plan [path]` | Execute a Claude Code plan using Cursor Agent |
 
 ### Task examples
 
@@ -42,8 +43,11 @@ Verify with:
 # Basic task
 /cursor:task "refactor the auth module to use JWT"
 
-# With a specific model
+# With a specific model (overrides workspace default for this run only)
 /cursor:task --model grok-4-20 "add error handling to the API layer"
+
+# Set default model for this workspace (then omit --model on tasks)
+/cursor:model grok-4-20
 
 # Write mode (allows file edits)
 /cursor:task --write "fix the failing tests in src/utils"
@@ -53,6 +57,11 @@ Verify with:
 
 # Read-only planning
 /cursor:task --mode plan "design the caching strategy"
+
+# Execute a Claude Code plan (auto-detects latest plan in ~/.claude/plans/)
+/cursor:execute-plan
+# Or specify a plan file explicitly
+/cursor:execute-plan ~/.claude/plans/my-plan.md
 ```
 
 ## Agent
@@ -65,7 +74,7 @@ The plugin includes a **cursor-rescue** subagent that Claude Code can invoke pro
 .claude-plugin/marketplace.json     Marketplace registry
 plugins/cursor/
   .claude-plugin/plugin.json        Plugin manifest
-  commands/                         7 slash commands (setup, task, review, models, status, result, cancel)
+  commands/                         8 slash commands (setup, task, review, model, execute-plan, status, result, cancel)
   agents/cursor-rescue.md           Auto-delegation subagent
   skills/cursor-cli-runtime/        Internal runtime contract
   hooks/hooks.json                  Session lifecycle hooks

@@ -53,6 +53,13 @@ export function setConfig(workspaceRoot, key, value) {
   writeState(workspaceRoot, state);
 }
 
+export function deleteConfigKey(workspaceRoot, key) {
+  const state = readState(workspaceRoot);
+  if (!state.config) return;
+  delete state.config[key];
+  writeState(workspaceRoot, state);
+}
+
 export function generateJobId(prefix = "job") {
   const ts = Date.now().toString(36);
   const rand = crypto.randomBytes(3).toString("hex");

@@ -23,6 +23,7 @@ import {
   listJobs,
   readJobFile,
   setConfig,
+  deleteConfigKey,
   upsertJob,
   writeJobFile,
   removeSessionJobs,
@@ -43,7 +44,7 @@ function printUsage() {
       "  cursor-companion review [--model <model>] [focus text]",
       "  cursor-companion status [job-id] [--all] [--json]",
       "  cursor-companion result [job-id] [--json]",
-      "  cursor-companion models [--json]",
+      "  cursor-companion model [<model-id>] [--clear] [--json]",
       "  cursor-companion cancel [job-id] [--json]",
     ].join("\n")
   );
@@ -104,6 +105,39 @@ function ensureCursorReady() {
   }
 }
 
+function getDefaultModelForWorkspace(workspaceRoot) {
+  const v = getConfig(workspaceRoot).defaultModel;
+  if (v == null || String(v).trim() === "") return undefined;
+  return String(v).trim();
+}
+
+async function listCursorModels() {
+  const { execFileSync } = await import("node:child_process");
+  let raw = "";
+  try {
+    raw = execFileSync("cursor-agent", ["--list-models"], {
+      encoding: "utf8",
+      timeout: 30000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    throw new Error("Failed to list models. Is cursor-agent installed and authenticated?");
+  }
+  const clean = raw.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07/g, "").trim();
+  const models = [];
+  for (const line of clean.split("\n")) {
+    const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((default|current)\))?$/);
+    if (match) {
+      models.push({
+        id: match[1],
+        name: match[2].trim(),
+        ...(match[3] ? { tag: match[3] } : {}),
+      });
+    }
+  }
+  return models;
+}
+
 // ── Setup ──
 
 function handleSetup(argv) {
@@ -145,6 +179,8 @@ async function handleTask(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   ensureCursorReady();
+
+  const effectiveModel = options.model ?? getDefaultModelForWorkspace(workspaceRoot) ?? undefined;
 
   // Read prompt
   let prompt;
@@ -188,7 +224,14 @@ async function handleTask(argv) {
     child.unref();
 
     upsertJob(workspaceRoot, { ...jobRecord, pid: child.pid });
-    writeJobFile(workspaceRoot, jobId, { ...jobRecord, pid: child.pid, prompt });
+    writeJobFile(workspaceRoot, jobId, {
+      ...jobRecord,
+      pid: child.pid,
+      prompt,
+      model: effectiveModel,
+      mode: options.mode ?? undefined,
+      write: Boolean(options.write),
+    });
 
     const payload = { jobId, status: "queued", summary: jobRecord.summary };
     outputResult(
@@ -206,7 +249,7 @@ async function handleTask(argv) {
   const result = await runCursorAgent({
     prompt,
     workspace: workspaceRoot,
-    model: options.model ?? undefined,
+    model: effectiveModel,
     mode: options.mode ?? undefined,
     write: Boolean(options.write),
     outputFormat: "text",
@@ -284,6 +327,8 @@ async function handleReview(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   ensureCursorReady();
 
+  const effectiveModel = options.model ?? getDefaultModelForWorkspace(workspaceRoot) ?? undefined;
+
   // Build review prompt from git diff
   let diffContext = "";
   try {
@@ -338,7 +383,7 @@ async function handleReview(argv) {
   const result = await runCursorAgent({
     prompt: reviewPrompt,
     workspace: workspaceRoot,
-    model: options.model ?? undefined,
+    model: effectiveModel,
     mode: "ask",
     write: false,
     outputFormat: "text",
@@ -435,54 +480,77 @@ function handleResult(argv) {
   );
 }
 
-// ── Models ──
+// ── Model (list + workspace default) ──
 
-async function handleModels(argv) {
-  const { options } = parseCommandInput(argv, {
-    booleanOptions: ["json"],
+async function handleModel(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json", "clear"],
   });
 
-  const { execFileSync } = await import("node:child_process");
-  let raw = "";
-  try {
-    raw = execFileSync("cursor-agent", ["--list-models"], {
-      encoding: "utf8",
-      timeout: 30000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (err) {
-    throw new Error("Failed to list models. Is cursor-agent installed and authenticated?");
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+
+  if (options.clear) {
+    deleteConfigKey(workspaceRoot, "defaultModel");
+    const payload = { defaultModel: null, cleared: true };
+    const text =
+      "Cleared the workspace default model. Cursor Agent will use its own default until you set one with `/cursor:model <model-id>`.\n";
+    outputResult(options.json ? payload : text, options.json);
+    return;
   }
 
-  // Strip ANSI escape sequences from cursor-agent output
-  const clean = raw.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07/g, "").trim();
+  const modelId = positionals.join(" ").trim();
 
-  // Parse into structured data
-  const models = [];
-  for (const line of clean.split("\n")) {
-    const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((default|current)\))?$/);
-    if (match) {
-      models.push({
-        id: match[1],
-        name: match[2].trim(),
-        ...(match[3] ? { tag: match[3] } : {}),
-      });
+  if (!modelId) {
+    const models = await listCursorModels();
+    const defaultModel = getDefaultModelForWorkspace(workspaceRoot);
+
+    if (options.json) {
+      outputResult({ models, defaultModel: defaultModel ?? null }, true);
+      return;
     }
-  }
 
-  if (options.json) {
-    outputResult({ models }, true);
-  } else {
     const lines = ["## Available Cursor Agent Models\n"];
     for (const m of models) {
       const tag = m.tag ? ` (${m.tag})` : "";
-      lines.push(`- **${m.id}** — ${m.name}${tag}`);
+      const wsTag = defaultModel === m.id ? " (workspace default)" : "";
+      lines.push(`- **${m.id}** — ${m.name}${tag}${wsTag}`);
     }
     lines.push("\n---");
-    lines.push("Use `--model <id>` when running a task:");
+    if (defaultModel) {
+      lines.push(
+        `Workspace default: **${defaultModel}** (used when \`--model\` is omitted on \`/cursor:task\` and \`/cursor:review\`).`
+      );
+    } else {
+      lines.push(
+        "No workspace default set. Run `/cursor:model <model-id>` to choose one, or pass `--model` on each run."
+      );
+    }
+    lines.push("\nOverride for a single run:");
     lines.push("  `/cursor:task --model grok-4-20 \"your prompt\"`");
     outputResult(lines.join("\n") + "\n", false);
+    return;
   }
+
+  ensureCursorReady();
+  const models = await listCursorModels();
+  const found = models.find((m) => m.id === modelId);
+  if (!found) {
+    throw new Error(
+      `Unknown model id: ${modelId}. Run /cursor:model with no arguments to see available models.`
+    );
+  }
+
+  setConfig(workspaceRoot, "defaultModel", modelId);
+  const payload = { defaultModel: modelId, model: found };
+  const text = [
+    `Set **${modelId}** (${found.name}) as the default model for this workspace.`,
+    "",
+    "Future `/cursor:task` and `/cursor:review` runs use this model when `--model` is not specified.",
+    "",
+  ].join("\n");
+  outputResult(options.json ? payload : text + "\n", options.json);
 }
 
 // ── Cancel ──
@@ -560,8 +628,8 @@ async function main() {
     case "result":
       handleResult(argv);
       break;
-    case "models":
-      await handleModels(argv);
+    case "model":
+      await handleModel(argv);
       break;
     case "cancel":
       handleCancel(argv);

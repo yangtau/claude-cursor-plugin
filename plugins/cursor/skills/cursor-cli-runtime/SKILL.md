@@ -21,5 +21,5 @@ Execution rules:
 
 Command defaults:
 - Add `--write` unless the user explicitly asks for read-only behavior or only wants review/diagnosis/research without edits.
-- Leave `--model` unset by default. Add `--model` only when the user explicitly asks for a specific model.
+- Leave `--model` off the CLI unless the user asks for a specific model for that run; if a workspace default exists (from `/cursor:model`), the companion applies it automatically.
 - Use exactly one `task` invocation per rescue handoff.
