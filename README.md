@@ -1,11 +1,15 @@
-# Cursor — Claude Code Plugin
+# Claude Agents — Multi-Agent Marketplace for Claude Code
 
-A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling you to delegate coding tasks, code reviews, and investigations to Cursor Agent directly from Claude Code.
+A unified marketplace for Claude Code that brings together multiple AI coding agents. Currently includes:
+
+- **Cursor Agent** — delegate coding tasks, code reviews, and investigations to Cursor Agent
+- **Codex** — OpenAI's coding agent for code review and task delegation
 
 ## Prerequisites
 
 - [Claude Code](https://claude.ai/code) CLI installed
-- [cursor-agent](https://cursor.com) CLI installed and authenticated (`cursor-agent login`)
+- For Cursor Agent: [cursor-agent](https://cursor.com) CLI installed and authenticated (`cursor-agent login`)
+- For Codex: [codex](https://github.com/openai/codex) CLI installed and authenticated (`codex login`)
 - Node.js 18.18 or later
 
 ## Installation
@@ -13,8 +17,9 @@ A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling
 In Claude Code, run the following commands:
 
 ```
-/plugin marketplace add yangtau/claude-cursor-plugin
-/plugin install cursor@cursor-agent-cc
+/plugin marketplace add yangtau/claude-agents-plugins
+/plugin install cursor@claude-agents
+/plugin install codex@claude-agents
 /reload-plugins
 ```
 
@@ -22,9 +27,12 @@ Verify with:
 
 ```
 /cursor:setup
+/codex:setup
 ```
 
-## Commands
+---
+
+## Cursor Agent Commands
 
 | Command | Description |
 |---|---|
@@ -37,7 +45,7 @@ Verify with:
 | `/cursor:cancel [job-id]` | Cancel a running background job |
 | `/cursor:execute-plan [path]` | Execute a Claude Code plan using Cursor Agent |
 
-### Task examples
+### Cursor Task Examples
 
 ```bash
 # Basic task
@@ -64,30 +72,85 @@ Verify with:
 /cursor:execute-plan ~/.claude/plans/my-plan.md
 ```
 
-## Agent
+---
 
-The plugin includes a **cursor-rescue** subagent that Claude Code can invoke proactively when it gets stuck on a complex debugging or implementation task. This works automatically — no manual invocation needed.
+## Codex Commands
+
+| Command | Description |
+|---|---|
+| `/codex:setup` | Check Codex availability and auth status |
+| `/codex:rescue <prompt>` | Delegate a task to the Codex rescue subagent |
+| `/codex:review` | Run a code review using Codex |
+| `/codex:adversarial-review [focus]` | Run an adversarial code review using Codex |
+| `/codex:status [job-id]` | Show active and recent jobs |
+| `/codex:result [job-id]` | Show output of a completed job |
+| `/codex:cancel [job-id]` | Cancel a running background job |
+| `/codex:execute-plan [path]` | Execute a Claude Code plan using Codex |
+
+### Codex Task Examples
+
+```bash
+# Basic rescue task
+/codex:rescue "fix the failing tests in the auth module"
+
+# With a specific model
+/codex:rescue --model gpt-5.3-codex-spark "optimize the database queries"
+
+# With reasoning effort level
+/codex:rescue --effort high "design a new caching layer"
+
+# Write mode (allows file edits)
+/codex:rescue --write "refactor the utils module"
+
+# Run in background
+/codex:rescue --background --write "migrate the database schema"
+
+# Resume last conversation
+/codex:rescue --resume "continue the previous task"
+
+# Run code review
+/codex:review
+
+# Execute a Claude Code plan (auto-detects latest plan in ~/.claude/plans/)
+/codex:execute-plan
+# Or specify a plan file explicitly
+/codex:execute-plan ~/.claude/plans/my-plan.md
+```
+
+---
 
 ## Architecture
 
 ```
 .claude-plugin/marketplace.json     Marketplace registry
-plugins/cursor/
-  .claude-plugin/plugin.json        Plugin manifest
-  commands/                         8 slash commands (setup, task, review, model, execute-plan, status, result, cancel)
-  agents/cursor-rescue.md           Auto-delegation subagent
-  skills/cursor-cli-runtime/        Internal runtime contract
-  hooks/hooks.json                  Session lifecycle hooks
-  scripts/
-    cursor-companion.mjs            Main script wrapping cursor-agent -p (headless mode)
-    session-lifecycle-hook.mjs      Session start/end handler
-    lib/                            Shared modules (state, args, cursor, render, etc.)
+plugins/
+  cursor/                           Cursor Agent plugin
+    .claude-plugin/plugin.json      Plugin manifest
+    commands/                       8 slash commands
+    agents/cursor-rescue.md         Auto-delegation subagent
+    skills/                         Internal skills
+    scripts/                        Companion scripts
+  codex/                            Codex plugin (OpenAI)
+    .claude-plugin/plugin.json      Plugin manifest
+    commands/                       8 slash commands (including execute-plan)
+    agents/codex-rescue.md          Auto-delegation subagent
+    skills/                         GPT-5.4 prompting, result handling
+    scripts/                        Codex companion scripts
 ```
 
-## How it works
+## How It Works
 
-All commands invoke `cursor-agent` in headless print mode (`-p --trust`) under the hood. Tasks can run in foreground (blocking) or background (detached worker process). Job state is persisted in `~/.claude/plugins/state/` for tracking and retrieval.
+All commands invoke the respective CLI tools in headless mode under the hood:
+- **Cursor**: `cursor-agent -p --trust`
+- **Codex**: `codex --approval-mode full-auto` (or similar)
+
+Tasks can run in foreground (blocking) or background (detached worker process). Job state is persisted in `~/.claude/plugins/state/` for tracking and retrieval.
 
 ## License
 
-MIT
+This marketplace contains plugins with different licenses:
+
+- **Cursor Agent plugin**: MIT License (see `LICENSE`)
+- **Codex plugin**: Apache License 2.0 (see `plugins/codex/LICENSE`) — Copyright OpenAI
+
+Each plugin retains its original license and copyright as specified in its respective directory.

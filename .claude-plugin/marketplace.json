@@ -1,11 +1,11 @@
 {
-  "name": "cursor-agent-cc",
+  "name": "claude-agents",
   "owner": {
     "name": "yangtau"
   },
   "metadata": {
-    "description": "Cursor Agent plugin for Claude Code — delegate coding tasks and reviews.",
-    "version": "0.1.0"
+    "description": "Multi-Agent Marketplace for Claude Code — Cursor and Codex agents for coding tasks and reviews.",
+    "version": "0.2.0"
   },
   "plugins": [
     {
@@ -16,6 +16,15 @@
         "name": "yangtau"
       },
       "source": "./plugins/cursor"
+    },
+    {
+      "name": "codex",
+      "description": "Use Codex from Claude Code to review code or delegate tasks.",
+      "version": "1.0.1",
+      "author": {
+        "name": "OpenAI"
+      },
+      "source": "./plugins/codex"
     }
   ]
 }
