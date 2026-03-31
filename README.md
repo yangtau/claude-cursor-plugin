@@ -12,7 +12,7 @@ A Claude Code plugin that wraps [cursor-agent](https://cursor.com) CLI, enabling
 In Claude Code, run:
 
 ```
-/install github:yangtau/claude-cursor-plugin
+/plugin github:yangtau/claude-cursor-plugin
 ```
 
 Then run `/reload-plugins` to activate. Verify with `/cursor:setup`.
