@@ -8,7 +8,16 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { getCursorAvailability, getCursorLoginStatus, runCursorAgent } from "./lib/cursor.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process-utils.mjs";
+import {
+  buildSingleJobSnapshot,
+  buildStatusSnapshot,
+  enrichJob,
+  readStoredJob,
+  resolveCancelableJob,
+  resolveResultJob,
+  sortJobsNewestFirst
+} from "./lib/job-control.mjs";
+import { terminateProcessTree } from "./lib/process-utils.mjs";
 import {
   renderSetupReport,
   renderTaskResult,
@@ -23,19 +32,27 @@ import {
   getConfig,
   listJobs,
   readJobFile,
+  resolveJobFile,
   setConfig,
   deleteConfigKey,
   upsertJob,
   writeJobFile,
-  removeSessionJobs,
 } from "./lib/state.mjs";
+import {
+  SESSION_ID_ENV,
+  nowIso,
+  createJobLogFile,
+  createJobRecord,
+  createJobProgressUpdater,
+  createProgressReporter,
+  runTrackedJob,
+  appendLogBlock,
+} from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const SESSION_ID_ENV = "CURSOR_COMPANION_SESSION_ID";
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const DEFAULT_MAX_STATUS_JOBS = 10;
 
 // ── Helpers ──
 
@@ -84,10 +101,6 @@ function resolveCommandCwd(options = {}) {
 
 function resolveCommandWorkspace(options = {}) {
   return resolveWorkspaceRoot(resolveCommandCwd(options));
-}
-
-function nowIso() {
-  return new Date().toISOString();
 }
 
 function sleep(ms) {
@@ -146,145 +159,17 @@ async function listCursorModels() {
   return models;
 }
 
-function isActiveJobStatus(status) {
-  return status === "queued" || status === "running";
-}
-
-function isFinishedJobStatus(status) {
-  return status === "completed" || status === "failed" || status === "cancelled";
-}
-
-function getCurrentSessionId(options = {}) {
-  return options.env?.[SESSION_ID_ENV] ?? process.env[SESSION_ID_ENV] ?? null;
-}
-
-function sortJobsNewestFirst(jobs) {
-  return [...jobs].sort((left, right) => {
-    const leftTs = Math.max(
-      Date.parse(left.completedAt ?? "") || 0,
-      Date.parse(left.startedAt ?? "") || 0
-    );
-    const rightTs = Math.max(
-      Date.parse(right.completedAt ?? "") || 0,
-      Date.parse(right.startedAt ?? "") || 0
-    );
-    return rightTs - leftTs || String(right.id ?? "").localeCompare(String(left.id ?? ""));
-  });
-}
-
-function filterJobsForCurrentSession(jobs, options = {}) {
-  const sessionId = getCurrentSessionId(options);
-  if (!sessionId) {
-    return jobs;
-  }
-  return jobs.filter((job) => job.sessionId === sessionId);
-}
-
-function formatElapsedDuration(startValue, endValue = null) {
-  const start = Date.parse(startValue ?? "");
-  if (!Number.isFinite(start)) {
-    return null;
-  }
-
-  const end = endValue ? Date.parse(endValue) : Date.now();
-  if (!Number.isFinite(end) || end < start) {
-    return null;
-  }
-
-  const totalSeconds = Math.max(0, Math.round((end - start) / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
-}
-
-function enrichJob(job) {
-  return {
-    ...job,
-    kindLabel: job.kind || "job",
-    elapsed: formatElapsedDuration(job.startedAt, job.completedAt ?? null),
-    duration: isFinishedJobStatus(job.status)
-      ? formatElapsedDuration(job.startedAt, job.completedAt ?? null)
-      : null,
-  };
-}
-
-function resolveJobReference(jobs, reference) {
-  if (!reference) {
-    return jobs[0] ?? null;
-  }
-
-  const exact = jobs.find((job) => job.id === reference);
-  if (exact) {
-    return exact;
-  }
-
-  const prefixMatches = jobs.filter((job) => job.id.startsWith(reference));
-  if (prefixMatches.length === 1) {
-    return prefixMatches[0];
-  }
-  if (prefixMatches.length > 1) {
-    throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
-  }
-  return null;
-}
-
-function buildStatusSnapshot(cwd, options = {}) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const sessionId = getCurrentSessionId(options);
-  const jobs = sortJobsNewestFirst(
-    options.all ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot), options)
-  );
-  const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
-
-  const running = jobs.filter((job) => isActiveJobStatus(job.status)).map((job) => enrichJob(job));
-  const latestFinishedRaw = jobs.find((job) => isFinishedJobStatus(job.status)) ?? null;
-  const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw) : null;
-  const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
-    .filter((job) => isFinishedJobStatus(job.status) && job.id !== latestFinished?.id)
-    .map((job) => enrichJob(job));
-
-  return {
-    workspaceRoot,
-    scopeLabel: options.all ? "all jobs" : sessionId ? "current session" : "repository",
-    running,
-    latestFinished,
-    recent,
-  };
-}
-
-function buildSingleJobSnapshot(cwd, reference) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const selected = resolveJobReference(jobs, reference);
-  if (!selected) {
-    throw new Error(`No job found for "${reference}". Run /cursor:status to inspect known jobs.`);
-  }
-
-  return {
-    workspaceRoot,
-    job: enrichJob(selected),
-  };
-}
-
 async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const deadline = Date.now() + timeoutMs;
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
-  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
+  while ((snapshot.job.status === "queued" || snapshot.job.status === "running") && Date.now() < deadline) {
     await sleep(Math.min(DEFAULT_STATUS_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
     snapshot = buildSingleJobSnapshot(cwd, reference);
   }
 
-  const waitTimedOut = isActiveJobStatus(snapshot.job.status);
+  const waitTimedOut = snapshot.job.status === "queued" || snapshot.job.status === "running";
   return {
     ...snapshot,
     waitTimedOut,
@@ -294,35 +179,6 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
       waitTimedOut,
     },
   };
-}
-
-function resolveResultJob(cwd, reference) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(
-    reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot))
-  );
-  const finishedJobs = jobs.filter((job) => isFinishedJobStatus(job.status));
-
-  if (reference) {
-    const selected = resolveJobReference(finishedJobs, reference);
-    if (selected) {
-      return { workspaceRoot, job: enrichJob(selected) };
-    }
-
-    const active = resolveJobReference(jobs.filter((job) => isActiveJobStatus(job.status)), reference);
-    if (active) {
-      throw new Error(`Job ${active.id} is still ${active.status}. Check /cursor:status and try again once it finishes.`);
-    }
-
-    throw new Error(`No finished job found for "${reference}". Run /cursor:status to inspect active jobs.`);
-  }
-
-  const selected = finishedJobs[0] ?? null;
-  if (!selected) {
-    throw new Error("No finished Cursor Agent jobs found for this repository yet.");
-  }
-
-  return { workspaceRoot, job: enrichJob(selected) };
 }
 
 // ── Setup ──
@@ -381,19 +237,17 @@ async function handleTask(argv) {
   }
 
   const jobId = generateJobId("task");
-  const jobRecord = {
+  const jobRecord = createJobRecord({
     id: jobId,
     kind: "task",
-    status: "running",
+    jobClass: "task",
+    status: "queued",
     summary: shorten(prompt),
-    startedAt: nowIso(),
-    sessionId: process.env[SESSION_ID_ENV] ?? null,
     write: Boolean(options.write),
-  };
+  });
 
   if (options.background) {
     // Background execution: spawn detached worker
-    jobRecord.status = "queued";
     upsertJob(workspaceRoot, jobRecord);
 
     const scriptPath = path.join(ROOT_DIR, "scripts", "cursor-companion.mjs");
@@ -410,7 +264,7 @@ async function handleTask(argv) {
     );
     child.unref();
 
-    upsertJob(workspaceRoot, { ...jobRecord, pid: child.pid });
+    upsertJob(workspaceRoot, { id: jobId, pid: child.pid });
     writeJobFile(workspaceRoot, jobId, {
       ...jobRecord,
       pid: child.pid,
@@ -428,35 +282,52 @@ async function handleTask(argv) {
     return;
   }
 
-  // Foreground execution
-  upsertJob(workspaceRoot, jobRecord);
-
-  process.stderr.write(`[cursor-companion] Running task: ${shorten(prompt, 60)}...\n`);
-
-  const result = await runCursorAgent({
-    prompt,
-    workspace: workspaceRoot,
-    model: effectiveModel,
-    mode: options.mode ?? undefined,
-    write: Boolean(options.write),
-    outputFormat: "text",
-    onData: (text) => process.stderr.write(text),
+  // Foreground execution via tracked job
+  const logFile = createJobLogFile(workspaceRoot, jobId, "Cursor Agent task");
+  const progressUpdater = createJobProgressUpdater(workspaceRoot, jobId);
+  const progressReporter = createProgressReporter({
+    stderr: true,
+    logFile,
+    onEvent: progressUpdater,
   });
 
-  const completedJob = {
+  const job = {
     ...jobRecord,
-    status: result.status === 0 ? "completed" : "failed",
-    completedAt: nowIso(),
-    errorMessage: result.status !== 0 ? result.stderr : undefined,
+    workspaceRoot,
+    logFile,
   };
-  upsertJob(workspaceRoot, completedJob);
-  writeJobFile(workspaceRoot, jobId, { ...completedJob, result: result.stdout, prompt });
 
-  const rendered = renderTaskResult(result, { title: "Cursor Agent Task", jobId });
-  outputResult(options.json ? { ...completedJob, result: result.stdout } : rendered, options.json);
+  const execution = await runTrackedJob(job, async () => {
+    progressReporter?.({ message: `Running task: ${shorten(prompt, 60)}`, phase: "running" });
 
-  if (result.status !== 0) {
-    process.exitCode = result.status;
+    const result = await runCursorAgent({
+      prompt,
+      workspace: workspaceRoot,
+      model: effectiveModel,
+      mode: options.mode ?? undefined,
+      write: Boolean(options.write),
+      outputFormat: "text",
+      onData: (text) => process.stderr.write(text),
+    });
+
+    const rendered = renderTaskResult(result, { title: "Cursor Agent Task", jobId });
+    return {
+      exitStatus: result.status,
+      payload: { stdout: result.stdout, stderr: result.stderr, prompt },
+      rendered,
+      summary: shorten(prompt),
+    };
+  }, { logFile });
+
+  outputResult(
+    options.json
+      ? { id: jobId, status: execution.exitStatus === 0 ? "completed" : "failed", result: execution.payload }
+      : execution.rendered,
+    options.json
+  );
+
+  if (execution.exitStatus !== 0) {
+    process.exitCode = execution.exitStatus;
   }
 }
 
@@ -473,32 +344,45 @@ async function handleTaskWorker(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const stored = readJobFile(workspaceRoot, options["job-id"]);
+  const jobFile = resolveJobFile(workspaceRoot, options["job-id"]);
+  const stored = readJobFile(jobFile);
   if (!stored) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
 
-  upsertJob(workspaceRoot, { id: stored.id, status: "running", startedAt: nowIso() });
-
-  const result = await runCursorAgent({
-    prompt: stored.prompt,
-    workspace: workspaceRoot,
-    model: stored.model ?? undefined,
-    mode: stored.mode ?? undefined,
-    write: Boolean(stored.write),
-    outputFormat: "text",
+  const logFile = createJobLogFile(workspaceRoot, stored.id, "Cursor Agent background task");
+  const progressUpdater = createJobProgressUpdater(workspaceRoot, stored.id);
+  const progressReporter = createProgressReporter({
+    logFile,
+    onEvent: progressUpdater,
   });
 
-  const completedJob = {
-    id: stored.id,
-    kind: stored.kind,
-    status: result.status === 0 ? "completed" : "failed",
-    completedAt: nowIso(),
-    summary: stored.summary,
-    errorMessage: result.status !== 0 ? result.stderr : undefined,
+  const job = {
+    ...stored,
+    workspaceRoot,
+    logFile,
   };
-  upsertJob(workspaceRoot, completedJob);
-  writeJobFile(workspaceRoot, stored.id, { ...stored, ...completedJob, result: result.stdout });
+
+  await runTrackedJob(job, async () => {
+    progressReporter?.({ message: "Running background task", phase: "running" });
+
+    const result = await runCursorAgent({
+      prompt: stored.prompt,
+      workspace: workspaceRoot,
+      model: stored.model ?? undefined,
+      mode: stored.mode ?? undefined,
+      write: Boolean(stored.write),
+      outputFormat: "text",
+    });
+
+    const rendered = renderTaskResult(result, { title: "Cursor Agent Task", jobId: stored.id });
+    return {
+      exitStatus: result.status,
+      payload: { stdout: result.stdout, stderr: result.stderr },
+      rendered,
+      summary: stored.summary,
+    };
+  }, { logFile });
 }
 
 // ── Review ──
@@ -555,42 +439,59 @@ async function handleReview(argv) {
     .join("\n");
 
   const jobId = generateJobId("review");
-  const jobRecord = {
+  const jobRecord = createJobRecord({
     id: jobId,
     kind: "review",
-    status: "running",
+    jobClass: "review",
+    status: "queued",
     summary: focusText ? shorten(`Review: ${focusText}`) : "Code review",
-    startedAt: nowIso(),
-    sessionId: process.env[SESSION_ID_ENV] ?? null,
-  };
-  upsertJob(workspaceRoot, jobRecord);
-
-  process.stderr.write("[cursor-companion] Running review...\n");
-
-  const result = await runCursorAgent({
-    prompt: reviewPrompt,
-    workspace: workspaceRoot,
-    model: effectiveModel,
-    mode: "ask",
-    write: false,
-    outputFormat: "text",
-    onData: (text) => process.stderr.write(text),
   });
 
-  const completedJob = {
+  const logFile = createJobLogFile(workspaceRoot, jobId, "Cursor Agent review");
+  const progressUpdater = createJobProgressUpdater(workspaceRoot, jobId);
+  const progressReporter = createProgressReporter({
+    stderr: true,
+    logFile,
+    onEvent: progressUpdater,
+  });
+
+  const job = {
     ...jobRecord,
-    status: result.status === 0 ? "completed" : "failed",
-    completedAt: nowIso(),
-    errorMessage: result.status !== 0 ? result.stderr : undefined,
+    workspaceRoot,
+    logFile,
   };
-  upsertJob(workspaceRoot, completedJob);
-  writeJobFile(workspaceRoot, jobId, { ...completedJob, result: result.stdout });
 
-  const rendered = renderReviewResult(result);
-  outputResult(options.json ? { ...completedJob, result: result.stdout } : rendered, options.json);
+  const execution = await runTrackedJob(job, async () => {
+    progressReporter?.({ message: "Running review", phase: "reviewing" });
 
-  if (result.status !== 0) {
-    process.exitCode = result.status;
+    const result = await runCursorAgent({
+      prompt: reviewPrompt,
+      workspace: workspaceRoot,
+      model: effectiveModel,
+      mode: "ask",
+      write: false,
+      outputFormat: "text",
+      onData: (text) => process.stderr.write(text),
+    });
+
+    const rendered = renderReviewResult(result);
+    return {
+      exitStatus: result.status,
+      payload: { stdout: result.stdout, stderr: result.stderr },
+      rendered,
+      summary: focusText ? shorten(`Review: ${focusText}`) : "Code review",
+    };
+  }, { logFile });
+
+  outputResult(
+    options.json
+      ? { id: jobId, status: execution.exitStatus === 0 ? "completed" : "failed", result: execution.payload }
+      : execution.rendered,
+    options.json
+  );
+
+  if (execution.exitStatus !== 0) {
+    process.exitCode = execution.exitStatus;
   }
 }
 
@@ -634,7 +535,7 @@ function handleResult(argv) {
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
-  const stored = readJobFile(workspaceRoot, job.id);
+  const stored = readStoredJob(workspaceRoot, job.id);
   outputResult(options.json ? { job, stored } : renderStoredJobResult(job, stored), options.json);
 }
 
@@ -720,14 +621,9 @@ function handleCancel(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
-  const workspaceRoot = resolveCommandWorkspace(options);
   const reference = positionals[0] ?? "";
 
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => isActiveJobStatus(job.status));
-  const job = reference ? resolveJobReference(jobs, reference) : jobs[0] ?? null;
-  if (!job) {
-    throw new Error(reference ? `No active job found for "${reference}".` : "No active jobs to cancel.");
-  }
+  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference);
 
   // Kill the process
   if (job.pid) {
@@ -737,12 +633,13 @@ function handleCancel(argv) {
   const cancelledJob = {
     ...enrichJob(job),
     status: "cancelled",
+    phase: "cancelled",
     completedAt: nowIso(),
     errorMessage: "Cancelled by user.",
   };
   upsertJob(workspaceRoot, cancelledJob);
   writeJobFile(workspaceRoot, job.id, {
-    ...(readJobFile(workspaceRoot, job.id) ?? {}),
+    ...(readStoredJob(workspaceRoot, job.id) ?? {}),
     ...cancelledJob,
   });
 
